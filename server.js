@@ -6,18 +6,31 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const ytDlp = require('youtube-dl-exec');
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const DIST_DIR = path.join(__dirname, 'dist');
+const INDEX_HTML_PATH = path.join(DIST_DIR, 'index.html');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3001;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '';
 const SUPPORTED_FORMATS = new Set(['mp3', 'mp4']);
 const SUPPORTED_VIDEO_QUALITIES = new Set(['best', '1080', '720', '480', '360']);
 const SUPPORTED_AUDIO_QUALITIES = new Set(['best', '320', '192', '128']);
 
-app.use(cors());
+const corsOrigins = CORS_ORIGIN
+  ? CORS_ORIGIN.split(',').map(origin => origin.trim()).filter(Boolean)
+  : true;
+
+app.use(cors({
+  origin: corsOrigins,
+  exposedHeaders: ['Content-Disposition', 'X-Download-Filename'],
+}));
 app.use(express.json());
 
 const sanitizeFileName = (value = 'video') =>
@@ -322,6 +335,14 @@ app.get('/api/download', async (req, res) => {
     res.status(status).json({ error: message });
   }
 });
+
+if (existsSync(INDEX_HTML_PATH)) {
+  app.use(express.static(DIST_DIR));
+
+  app.get(/^(?!\/api).*/, (req, res) => {
+    res.sendFile(INDEX_HTML_PATH);
+  });
+}
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);

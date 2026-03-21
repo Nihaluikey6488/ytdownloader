@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import './App.css'
 
 const YOUTUBE_HOSTS = new Set(['youtube.com', 'm.youtube.com', 'youtu.be'])
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, '') || ''
 const NUMBER_FORMATTER = new Intl.NumberFormat('en-US', {
   notation: 'compact',
   maximumFractionDigits: 1,
@@ -44,6 +45,11 @@ const getFileNameFromHeaders = (response, fallbackExtension) => {
   const fileNameMatch = disposition?.match(/filename="([^"]+)"/i)
 
   return fileNameMatch?.[1] || `youtube-download.${fallbackExtension}`
+}
+
+const buildApiUrl = (path, searchParams) => {
+  const query = searchParams ? `?${searchParams.toString()}` : ''
+  return `${API_BASE_URL}${path}${query}`
 }
 
 const formatDuration = (duration) => {
@@ -108,8 +114,9 @@ function App() {
         setPreviewStatus('loading')
         setPreviewError('')
 
+        const searchParams = new URLSearchParams({ url: trimmedUrl })
         const response = await fetch(
-          `/api/info?url=${encodeURIComponent(trimmedUrl)}`,
+          buildApiUrl('/api/info', searchParams),
           { signal: controller.signal },
         )
 
@@ -172,7 +179,7 @@ function App() {
         quality,
       })
 
-      const response = await fetch(`/api/download?${searchParams.toString()}`)
+      const response = await fetch(buildApiUrl('/api/download', searchParams))
 
       if (!response.ok) {
         const payload = await response.json().catch(() => null)
@@ -217,7 +224,7 @@ function App() {
     <div className="downloader-shell">
       <section className="downloader-card control-panel">
         <div className="panel-topline">
-          <p className="eyebrow">React + Express</p>
+          <p className="eyebrow"></p>
           <span className="live-pill">Live preview</span>
         </div>
 

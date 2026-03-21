@@ -1,0 +1,9 @@
+node_modules
+dist
+.git
+.gitignore
+*.log
+download-test.mp3
+tmp-test.mp3
+tmp-test-final.mp3
+tmp-video-test.mp4
