@@ -2,6 +2,10 @@ FROM node:22-bookworm-slim AS builder
 
 WORKDIR /app
 
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 \
+  && rm -rf /var/lib/apt/lists/*
+
 COPY package*.json ./
 RUN npm ci
 
@@ -15,7 +19,7 @@ ENV NODE_ENV=production
 ENV PORT=3001
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg \
+  && apt-get install -y --no-install-recommends ffmpeg python3 \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
