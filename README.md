@@ -60,6 +60,7 @@ Important ones:
 - `CORS_ORIGIN`: optional comma-separated allowlist for cross-origin frontend deployments
 - `VITE_API_BASE_URL`: optional frontend API base URL when the frontend and backend are deployed separately
 - `FFMPEG_PATH`: optional explicit path to `ffmpeg`
+- `YT_DLP_PATH`: optional explicit path to a system `yt-dlp` binary
 
 ## Deploy globally
 
@@ -75,6 +76,10 @@ Use one Node server for both frontend and backend:
 This is the simplest way to deploy the full app globally.
 
 ## Option 2: Docker
+
+The included Docker image is the recommended path for Render. It installs
+system `yt-dlp` and `ffmpeg`, then starts the single Express server that serves
+both the frontend and the API.
 
 Build the image:
 

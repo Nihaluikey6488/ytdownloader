@@ -2,9 +2,8 @@ FROM node:22-bookworm-slim AS builder
 
 WORKDIR /app
 
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 \
-  && rm -rf /var/lib/apt/lists/*
+ENV YOUTUBE_DL_SKIP_PYTHON_CHECK=1
+ENV YOUTUBE_DL_SKIP_DOWNLOAD=1
 
 COPY package*.json ./
 RUN npm ci
@@ -17,9 +16,12 @@ FROM node:22-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3001
+ENV YOUTUBE_DL_SKIP_PYTHON_CHECK=1
+ENV YOUTUBE_DL_SKIP_DOWNLOAD=1
+ENV YT_DLP_PATH=yt-dlp
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg python3 \
+  && apt-get install -y --no-install-recommends ffmpeg python3 yt-dlp \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./

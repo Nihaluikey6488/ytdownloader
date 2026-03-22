@@ -47,6 +47,75 @@ const getFileNameFromHeaders = (response, fallbackExtension) => {
   return fileNameMatch?.[1] || `youtube-download.${fallbackExtension}`
 }
 
+const getContentType = (response) =>
+  response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() || ''
+
+const isJsonResponse = (response) => getContentType(response).includes('json')
+
+const looksLikeHtml = (value) => /<!doctype html|<html/i.test(value)
+
+const getApiErrorMessage = async (response, fallbackMessage) => {
+  if (isJsonResponse(response)) {
+    const payload = await response.json().catch(() => null)
+    return payload?.error || fallbackMessage
+  }
+
+  const text = await response.text().catch(() => '')
+  if (looksLikeHtml(text)) {
+    return API_BASE_URL
+      ? 'The configured API URL is returning a web page instead of the backend API.'
+      : 'Backend API not found. Set VITE_API_BASE_URL to your deployed backend URL and rebuild the frontend.'
+  }
+
+  const condensedText = text
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  return condensedText || fallbackMessage
+}
+
+const isExpectedDownloadResponse = (response, format) => {
+  const contentType = getContentType(response)
+
+  if (!contentType || contentType === 'application/octet-stream') {
+    return true
+  }
+
+  if (format === 'mp3') {
+    return contentType.startsWith('audio/')
+  }
+
+  return contentType.startsWith('video/')
+}
+
+const getDownloadErrorMessage = async (response) => {
+  const contentType = getContentType(response)
+
+  if (contentType.includes('json')) {
+    const payload = await response.json().catch(() => null)
+    return payload?.error || 'Download failed. Please try again.'
+  }
+
+  const text = await response.text().catch(() => '')
+  if (looksLikeHtml(text)) {
+    return API_BASE_URL
+      ? 'The configured download API is returning a web page instead of a file.'
+      : 'Backend API not found. Set VITE_API_BASE_URL to your deployed backend URL and rebuild the frontend.'
+  }
+
+  const condensedText = text
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (condensedText) {
+    return condensedText.slice(0, 180)
+  }
+
+  return 'Download failed. Please try again.'
+}
+
 const buildApiUrl = (path, searchParams) => {
   const query = searchParams ? `?${searchParams.toString()}` : ''
   return `${API_BASE_URL}${path}${query}`
@@ -120,9 +189,10 @@ function App() {
           { signal: controller.signal },
         )
 
-        if (!response.ok) {
-          const payload = await response.json().catch(() => null)
-          throw new Error(payload?.error || 'Preview unavailable right now.')
+        if (!response.ok || !isJsonResponse(response)) {
+          throw new Error(
+            await getApiErrorMessage(response, 'Preview unavailable right now.'),
+          )
         }
 
         const payload = await response.json()
@@ -181,12 +251,15 @@ function App() {
 
       const response = await fetch(buildApiUrl('/api/download', searchParams))
 
-      if (!response.ok) {
-        const payload = await response.json().catch(() => null)
-        throw new Error(payload?.error || 'Download failed. Please try again.')
+      if (!response.ok || !isExpectedDownloadResponse(response, format)) {
+        throw new Error(await getDownloadErrorMessage(response))
       }
 
       const downloadBlob = await response.blob()
+      if (downloadBlob.size === 0) {
+        throw new Error('Downloaded file was empty. Please try again.')
+      }
+
       const objectUrl = window.URL.createObjectURL(downloadBlob)
       const fileName = getFileNameFromHeaders(response, format)
       const link = document.createElement('a')
@@ -197,7 +270,9 @@ function App() {
       link.click()
       link.remove()
 
-      window.URL.revokeObjectURL(objectUrl)
+      window.setTimeout(() => {
+        window.URL.revokeObjectURL(objectUrl)
+      }, 60_000)
 
       setStatus(`Download ready: ${fileName}`)
       setStatusTone('success')

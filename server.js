@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -9,11 +9,19 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
-const ytDlp = require('youtube-dl-exec');
+const ytDlpPackage = require('youtube-dl-exec');
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DIST_DIR = path.join(__dirname, 'dist');
 const INDEX_HTML_PATH = path.join(DIST_DIR, 'index.html');
+const configuredYtDlpPath = process.env.YT_DLP_PATH?.trim();
+const ytDlpBinaryPath =
+  configuredYtDlpPath ||
+  ytDlpPackage.constants?.YOUTUBE_DL_PATH ||
+  'yt-dlp';
+const ytDlp = configuredYtDlpPath
+  ? ytDlpPackage.create(configuredYtDlpPath)
+  : ytDlpPackage;
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3001;
@@ -22,6 +30,12 @@ const CORS_ORIGIN = process.env.CORS_ORIGIN || '';
 const SUPPORTED_FORMATS = new Set(['mp3', 'mp4']);
 const SUPPORTED_VIDEO_QUALITIES = new Set(['best', '1080', '720', '480', '360']);
 const SUPPORTED_AUDIO_QUALITIES = new Set(['best', '320', '192', '128']);
+const CONTENT_TYPE_BY_EXTENSION = {
+  mp3: 'audio/mpeg',
+  mp4: 'video/mp4',
+  m4a: 'audio/mp4',
+  webm: 'video/webm',
+};
 
 const corsOrigins = CORS_ORIGIN
   ? CORS_ORIGIN.split(',').map(origin => origin.trim()).filter(Boolean)
@@ -100,6 +114,20 @@ const findWinGetFfmpeg = () => {
   return null;
 };
 
+const findExecutableOnPath = executableName => {
+  const locatorCommand = process.platform === 'win32' ? 'where.exe' : 'which';
+  const result = spawnSync(locatorCommand, [executableName], { encoding: 'utf8' });
+
+  if (result.status !== 0) {
+    return null;
+  }
+
+  return result.stdout
+    .split(/\r?\n/)
+    .map(value => value.trim())
+    .find(Boolean) || null;
+};
+
 const resolveFfmpegPath = () => {
   const configuredPath = process.env.FFMPEG_PATH?.trim();
   if (configuredPath && existsSync(configuredPath)) {
@@ -108,14 +136,81 @@ const resolveFfmpegPath = () => {
 
   const pathResult = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' });
   if (pathResult.status === 0) {
-    return 'ffmpeg';
+    return findExecutableOnPath('ffmpeg') || 'ffmpeg';
   }
 
   return findWinGetFfmpeg();
 };
 
 const FFMPEG_PATH = resolveFfmpegPath();
+const FFMPEG_LOCATION = FFMPEG_PATH ? path.dirname(FFMPEG_PATH) : null;
 const hasFfmpeg = () => Boolean(FFMPEG_PATH);
+const FFPROBE_PATH = !FFMPEG_PATH
+  ? null
+  : FFMPEG_PATH === 'ffmpeg'
+    ? 'ffprobe'
+    : path.join(
+        path.dirname(FFMPEG_PATH),
+        `ffprobe${path.extname(FFMPEG_PATH)}`,
+      );
+
+const runProcess = (command, args) =>
+  new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+
+    let stderr = '';
+
+    child.stderr.on('data', chunk => {
+      stderr += chunk.toString();
+    });
+
+    child.on('error', reject);
+    child.on('close', code => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(stderr.trim() || `${command} exited with code ${code}`));
+    });
+  });
+
+const runProcessForOutput = (command, args) =>
+  new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', chunk => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on('data', chunk => {
+      stderr += chunk.toString();
+    });
+
+    child.on('error', reject);
+    child.on('close', code => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+
+      reject(new Error(stderr.trim() || stdout.trim() || `${command} exited with code ${code}`));
+    });
+  });
+
+const runYtDlpDownload = async (url, flags) => {
+  await runProcess(ytDlpBinaryPath, [...ytDlpPackage.args(flags), url]);
+};
+
+const AUDIO_CODECS_SUPPORTED_IN_MP4 = new Set(['aac']);
+const VIDEO_CODECS_SUPPORTED_IN_MP4 = new Set(['h264']);
 
 const cleanupDirectory = async directoryPath => {
   if (!directoryPath) {
@@ -125,16 +220,198 @@ const cleanupDirectory = async directoryPath => {
   await rm(directoryPath, { recursive: true, force: true });
 };
 
-const findDownloadedFile = async directoryPath => {
+const findDownloadedFiles = async directoryPath => {
   const files = await readdir(directoryPath, { withFileTypes: true });
-  const fileEntry = files.find(
-    entry =>
-      entry.isFile() &&
-      !entry.name.endsWith('.part') &&
-      !entry.name.endsWith('.ytdl'),
+  return files
+    .filter(
+      entry =>
+        entry.isFile() &&
+        !entry.name.endsWith('.part') &&
+        !entry.name.endsWith('.ytdl'),
+    )
+    .map(entry => path.join(directoryPath, entry.name));
+};
+
+const pickPrimaryDownloadedFile = filePaths => {
+  const preferredFilePath =
+    filePaths.find(filePath => !/\.f\d+\./i.test(path.basename(filePath))) ||
+    filePaths[0] ||
+    null;
+
+  return preferredFilePath;
+};
+
+const getMediaStreamKinds = async filePath => {
+  if (!FFPROBE_PATH) {
+    return [];
+  }
+
+  const { stdout } = await runProcessForOutput(FFPROBE_PATH, [
+    '-v',
+    'error',
+    '-show_entries',
+    'stream=codec_type',
+    '-of',
+    'default=noprint_wrappers=1:nokey=1',
+    filePath,
+  ]);
+
+  return stdout
+    .split(/\r?\n/)
+    .map(value => value.trim())
+    .filter(Boolean);
+};
+
+const getMediaInfo = async filePath => {
+  if (!FFPROBE_PATH) {
+    return { streams: [] };
+  }
+
+  const { stdout } = await runProcessForOutput(FFPROBE_PATH, [
+    '-v',
+    'error',
+    '-show_entries',
+    'stream=index,codec_name,codec_type,pix_fmt',
+    '-of',
+    'json',
+    filePath,
+  ]);
+
+  return JSON.parse(stdout);
+};
+
+const findStreamFile = async (filePaths, kind) => {
+  for (const filePath of filePaths) {
+    const streamKinds = await getMediaStreamKinds(filePath);
+    if (streamKinds.includes(kind)) {
+      return filePath;
+    }
+  }
+
+  return null;
+};
+
+const createCompatibleMp4FromSources = async (videoPath, audioPath, directoryPath) => {
+  const outputPath = path.join(directoryPath, 'compatible-output.mp4');
+  const videoInfo = await getMediaInfo(videoPath);
+  const audioInfo = await getMediaInfo(audioPath);
+  const videoStream = videoInfo.streams?.find(stream => stream.codec_type === 'video');
+  const audioStream = audioInfo.streams?.find(stream => stream.codec_type === 'audio');
+  const canCopyVideo =
+    videoStream &&
+    VIDEO_CODECS_SUPPORTED_IN_MP4.has(videoStream.codec_name) &&
+    videoStream.pix_fmt === 'yuv420p';
+  const canCopyAudio =
+    audioStream &&
+    AUDIO_CODECS_SUPPORTED_IN_MP4.has(audioStream.codec_name);
+
+  await runProcess(FFMPEG_PATH, [
+    '-y',
+    '-i',
+    videoPath,
+    '-i',
+    audioPath,
+    '-map',
+    '0:v:0',
+    '-map',
+    '1:a:0',
+    '-c:v',
+    canCopyVideo ? 'copy' : 'libx264',
+    ...(canCopyVideo
+      ? []
+      : [
+          '-preset',
+          'veryfast',
+          '-crf',
+          '23',
+          '-pix_fmt',
+          'yuv420p',
+        ]),
+    '-c:a',
+    canCopyAudio ? 'copy' : 'aac',
+    ...(canCopyAudio ? [] : ['-b:a', '192k']),
+    '-movflags',
+    '+faststart',
+    outputPath,
+  ]);
+
+  return outputPath;
+};
+
+const findDownloadedFile = async directoryPath => {
+  const filePaths = await findDownloadedFiles(directoryPath);
+  const primaryFilePath = pickPrimaryDownloadedFile(filePaths);
+
+  return primaryFilePath;
+};
+
+const resolveVideoDownloadPath = async directoryPath => {
+  const filePaths = await findDownloadedFiles(directoryPath);
+  const primaryFilePath = pickPrimaryDownloadedFile(filePaths);
+
+  if (primaryFilePath && !/\.f\d+\./i.test(path.basename(primaryFilePath))) {
+    return createCompatibleMp4(primaryFilePath, directoryPath);
+  }
+
+  const videoFilePath = await findStreamFile(filePaths, 'video');
+  const audioFilePath = await findStreamFile(
+    filePaths.filter(filePath => filePath !== videoFilePath),
+    'audio',
   );
 
-  return fileEntry ? path.join(directoryPath, fileEntry.name) : null;
+  if (videoFilePath && audioFilePath) {
+    return createCompatibleMp4FromSources(videoFilePath, audioFilePath, directoryPath);
+  }
+
+  if (primaryFilePath) {
+    return createCompatibleMp4(primaryFilePath, directoryPath);
+  }
+
+  return null;
+};
+
+const createCompatibleMp4 = async (inputPath, directoryPath) => {
+  const outputPath = path.join(directoryPath, 'compatible-output.mp4');
+  const mediaInfo = await getMediaInfo(inputPath);
+  const videoStream = mediaInfo.streams?.find(stream => stream.codec_type === 'video');
+  const audioStream = mediaInfo.streams?.find(stream => stream.codec_type === 'audio');
+  const canCopyVideo =
+    videoStream &&
+    VIDEO_CODECS_SUPPORTED_IN_MP4.has(videoStream.codec_name) &&
+    videoStream.pix_fmt === 'yuv420p';
+  const canCopyAudio =
+    audioStream &&
+    AUDIO_CODECS_SUPPORTED_IN_MP4.has(audioStream.codec_name);
+
+  await runProcess(FFMPEG_PATH, [
+    '-y',
+    '-i',
+    inputPath,
+    '-map',
+    '0:v:0',
+    '-map',
+    '0:a?',
+    '-c:v',
+    canCopyVideo ? 'copy' : 'libx264',
+    ...(canCopyVideo
+      ? []
+      : [
+          '-preset',
+          'veryfast',
+          '-crf',
+          '23',
+          '-pix_fmt',
+          'yuv420p',
+        ]),
+    '-c:a',
+    canCopyAudio ? 'copy' : 'aac',
+    ...(canCopyAudio ? [] : ['-b:a', '192k']),
+    '-movflags',
+    '+faststart',
+    outputPath,
+  ]);
+
+  return outputPath;
 };
 
 const getRequestedQuality = (format, quality) => {
@@ -154,13 +431,13 @@ const getRequestedQuality = (format, quality) => {
 const createVideoFormatSelector = quality => {
   if (quality === 'best') {
     return hasFfmpeg()
-      ? 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best'
-      : 'b[ext=mp4]/best';
+      ? 'bv*[vcodec!=none]+ba[acodec!=none]/b[vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]'
+      : 'b[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4][vcodec!=none][acodec!=none]/b[vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]';
   }
 
   return hasFfmpeg()
-    ? `bv*[height<=${quality}][ext=mp4]+ba[ext=m4a]/b[height<=${quality}][ext=mp4]/bv*[height<=${quality}]+ba/b[height<=${quality}]/best[height<=${quality}]`
-    : `b[height<=${quality}][ext=mp4]/best[height<=${quality}][ext=mp4]/b[height<=${quality}]/best[height<=${quality}]`;
+    ? `bv*[height<=${quality}][vcodec!=none]+ba[acodec!=none]/b[height<=${quality}][vcodec!=none][acodec!=none]/best[height<=${quality}][vcodec!=none][acodec!=none]`
+    : `b[height<=${quality}][ext=mp4][vcodec!=none][acodec!=none]/best[height<=${quality}][ext=mp4][vcodec!=none][acodec!=none]/b[height<=${quality}][vcodec!=none][acodec!=none]/best[height<=${quality}][vcodec!=none][acodec!=none]`;
 };
 
 const pickThumbnail = info => {
@@ -201,7 +478,7 @@ const createDownloadError = (details = '') => {
   if (trimmedDetails.includes('ffmpeg not found')) {
     return {
       status: 503,
-      message: 'MP3 conversion requires ffmpeg to be installed on the server.',
+      message: 'This server is missing ffmpeg, which is required for MP3 conversion and reliable MP4 audio/video output.',
     };
   }
 
@@ -217,6 +494,11 @@ const createDownloadError = (details = '') => {
     message: 'Failed to download the requested video.',
   };
 };
+
+const createErrorPayload = (message, details = '') =>
+  process.env.NODE_ENV === 'production' || !details
+    ? { error: message }
+    : { error: message, details };
 
 app.get('/api/health', (req, res) => {
   res.json({
@@ -241,7 +523,7 @@ app.get('/api/info', async (req, res) => {
     const { status, message } = createDownloadError(details);
 
     console.error('Info lookup error:', details || error);
-    res.status(status).json({ error: message });
+    res.status(status).json(createErrorPayload(message, details));
   }
 });
 
@@ -266,7 +548,13 @@ app.get('/api/download', async (req, res) => {
 
   if (format === 'mp3' && !hasFfmpeg()) {
     return res.status(503).json({
-      error: 'MP3 conversion is unavailable because ffmpeg is not installed on the server.',
+      error: 'This server is missing ffmpeg, which is required for MP3 conversion and reliable MP4 audio/video output.',
+    });
+  }
+
+  if (format === 'mp4' && !hasFfmpeg()) {
+    return res.status(503).json({
+      error: 'This server is missing ffmpeg, so MP4 downloads may lose audio. Install ffmpeg on the backend and try again.',
     });
   }
 
@@ -284,27 +572,39 @@ app.get('/api/download', async (req, res) => {
             extractAudio: true,
             audioFormat: 'mp3',
             audioQuality: requestedQuality === 'best' ? '0' : `${requestedQuality}K`,
-            ffmpegLocation: FFMPEG_PATH,
+            ffmpegLocation: FFMPEG_LOCATION || FFMPEG_PATH,
+            concurrentFragments: 4,
             output: outputTemplate,
             noWarnings: true,
           }
         : {
             format: createVideoFormatSelector(requestedQuality),
-            mergeOutputFormat: hasFfmpeg() ? 'mp4' : undefined,
-            ffmpegLocation: FFMPEG_PATH || undefined,
+            mergeOutputFormat: hasFfmpeg() ? 'mkv' : undefined,
+            ffmpegLocation: FFMPEG_LOCATION || FFMPEG_PATH || undefined,
+            concurrentFragments: 4,
             output: outputTemplate,
             noWarnings: true,
           };
 
-    await ytDlp(normalizedUrl, ytDlpFlags);
+    await runYtDlpDownload(normalizedUrl, ytDlpFlags);
 
-    const downloadedFile = await findDownloadedFile(tempDir);
+    const rawDownloadedFile = await findDownloadedFile(tempDir);
+    if (!rawDownloadedFile) {
+      throw new Error('Downloaded file was not created.');
+    }
+
+    const downloadedFile =
+      format === 'mp4' && hasFfmpeg()
+        ? await resolveVideoDownloadPath(tempDir)
+        : rawDownloadedFile;
+
     if (!downloadedFile) {
       throw new Error('Downloaded file was not created.');
     }
 
     const actualExtension = path.extname(downloadedFile).replace('.', '') || format;
     const safeTitle = sanitizeFileName(info.title);
+    const contentType = CONTENT_TYPE_BY_EXTENSION[actualExtension] || 'application/octet-stream';
     const qualitySuffix =
       format === 'mp4' && requestedQuality !== 'best'
         ? `-${requestedQuality}p`
@@ -313,6 +613,7 @@ app.get('/api/download', async (req, res) => {
           : '';
     const fileName = `${safeTitle}${qualitySuffix}.${actualExtension}`;
 
+    res.type(contentType);
     res.setHeader('X-Download-Filename', fileName);
 
     res.download(downloadedFile, fileName, async error => {
@@ -332,7 +633,7 @@ app.get('/api/download', async (req, res) => {
 
     console.error('Download setup error:', details || error);
     await cleanupDirectory(tempDir);
-    res.status(status).json({ error: message });
+    res.status(status).json(createErrorPayload(message, details));
   }
 });
 
