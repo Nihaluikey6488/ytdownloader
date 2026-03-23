@@ -51,8 +51,66 @@ const getContentType = (response) =>
   response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() || ''
 
 const isJsonResponse = (response) => getContentType(response).includes('json')
+const isHtmlResponse = (response) => getContentType(response).includes('html')
 
 const looksLikeHtml = (value) => /<!doctype html|<html/i.test(value)
+
+const getApiBaseCandidates = () => {
+  const candidates = ['']
+
+  if (API_BASE_URL) {
+    candidates.push(API_BASE_URL)
+  }
+
+  return [...new Set(candidates)]
+}
+
+const shouldRetryAgainstNextApiBase = (response) =>
+  response.status === 404 ||
+  response.status === 405 ||
+  isHtmlResponse(response)
+
+const buildApiUrl = (baseUrl, path, searchParams) => {
+  const query = searchParams ? `?${searchParams.toString()}` : ''
+  return `${baseUrl}${path}${query}`
+}
+
+const fetchApiWithFallback = async (path, searchParams, init, isExpectedResponse) => {
+  const apiBases = getApiBaseCandidates()
+  let lastResponse = null
+  let lastError = null
+
+  for (let index = 0; index < apiBases.length; index += 1) {
+    const baseUrl = apiBases[index]
+    const hasAnotherCandidate = index < apiBases.length - 1
+
+    try {
+      const response = await fetch(buildApiUrl(baseUrl, path, searchParams), init)
+
+      if (!isExpectedResponse || isExpectedResponse(response)) {
+        return response
+      }
+
+      lastResponse = response
+
+      if (!hasAnotherCandidate || !shouldRetryAgainstNextApiBase(response)) {
+        return response
+      }
+    } catch (error) {
+      lastError = error
+
+      if (!hasAnotherCandidate) {
+        throw error
+      }
+    }
+  }
+
+  if (lastResponse) {
+    return lastResponse
+  }
+
+  throw lastError || new Error('Cannot reach the API right now.')
+}
 
 const getApiErrorMessage = async (response, fallbackMessage) => {
   if (isJsonResponse(response)) {
@@ -114,11 +172,6 @@ const getDownloadErrorMessage = async (response) => {
   }
 
   return 'Download failed. Please try again.'
-}
-
-const buildApiUrl = (path, searchParams) => {
-  const query = searchParams ? `?${searchParams.toString()}` : ''
-  return `${API_BASE_URL}${path}${query}`
 }
 
 const formatDuration = (duration) => {
@@ -184,9 +237,11 @@ function App() {
         setPreviewError('')
 
         const searchParams = new URLSearchParams({ url: trimmedUrl })
-        const response = await fetch(
-          buildApiUrl('/api/info', searchParams),
+        const response = await fetchApiWithFallback(
+          '/api/info',
+          searchParams,
           { signal: controller.signal },
+          (candidateResponse) => candidateResponse.ok && isJsonResponse(candidateResponse),
         )
 
         if (!response.ok || !isJsonResponse(response)) {
@@ -249,7 +304,12 @@ function App() {
         quality,
       })
 
-      const response = await fetch(buildApiUrl('/api/download', searchParams))
+      const response = await fetchApiWithFallback(
+        '/api/download',
+        searchParams,
+        undefined,
+        (candidateResponse) => candidateResponse.ok && isExpectedDownloadResponse(candidateResponse, format),
+      )
 
       if (!response.ok || !isExpectedDownloadResponse(response, format)) {
         throw new Error(await getDownloadErrorMessage(response))

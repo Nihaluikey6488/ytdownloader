@@ -105,6 +105,48 @@ If you deploy the frontend and backend separately:
 - set `CORS_ORIGIN` on the backend
 - set `VITE_API_BASE_URL` on the frontend before building
 
+## Recommended deploy: Render + Cloudflare Pages
+
+### Backend on Render
+
+This repo now includes [render.yaml](./render.yaml) for the backend.
+
+1. Push the repo to GitHub.
+2. In Render, create a new Blueprint or Web Service from the repo.
+3. Let Render use the included `render.yaml` and `Dockerfile`.
+4. Set these env vars in Render:
+   - `FRONTEND_URL=https://YOUR-CLOUDFLARE-PAGES-SITE.pages.dev`
+   - `CORS_ORIGIN=https://YOUR-CLOUDFLARE-PAGES-SITE.pages.dev`
+
+After deploy, test:
+
+- `https://YOUR-RENDER-SERVICE.onrender.com/api/health`
+
+It must return JSON.
+
+### Frontend on Cloudflare Pages
+
+Use Cloudflare Pages for the React frontend only.
+
+Build settings:
+
+- build command: `npm run build`
+- build output directory: `dist`
+
+Cloudflare Pages environment variable:
+
+- `VITE_API_BASE_URL=https://YOUR-RENDER-SERVICE.onrender.com`
+
+Then redeploy the Pages site.
+
+### Final wiring check
+
+Once both are deployed:
+
+- open the Cloudflare Pages URL
+- paste a YouTube URL
+- confirm `/api/info` and `/api/download` are going to `onrender.com`, not `pages.dev`
+
 ## Notes
 
 - This app is not a good fit for static-only hosting by itself because downloads are handled by the Express backend.

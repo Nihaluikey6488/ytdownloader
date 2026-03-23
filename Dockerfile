@@ -18,10 +18,12 @@ ENV NODE_ENV=production
 ENV PORT=3001
 ENV YOUTUBE_DL_SKIP_PYTHON_CHECK=1
 ENV YOUTUBE_DL_SKIP_DOWNLOAD=1
-ENV YT_DLP_PATH=yt-dlp
+ENV YT_DLP_PATH=/usr/local/bin/yt-dlp
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg python3 yt-dlp \
+  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg python3 \
+  && curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o /usr/local/bin/yt-dlp \
+  && chmod 0755 /usr/local/bin/yt-dlp \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
