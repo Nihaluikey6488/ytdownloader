@@ -30,6 +30,7 @@ const CORS_ORIGIN = process.env.CORS_ORIGIN || '';
 const SUPPORTED_FORMATS = new Set(['mp3', 'mp4']);
 const SUPPORTED_VIDEO_QUALITIES = new Set(['best', '1080', '720', '480', '360']);
 const SUPPORTED_AUDIO_QUALITIES = new Set(['best', '320', '192', '128']);
+const YT_DLP_EXTRACTOR_ARGS = 'youtube:player_client=android,web_safari,web';
 const CONTENT_TYPE_BY_EXTENSION = {
   mp3: 'audio/mpeg',
   mp4: 'video/mp4',
@@ -207,6 +208,18 @@ const runProcessForOutput = (command, args) =>
 
 const runYtDlpDownload = async (url, flags) => {
   await runProcess(ytDlpBinaryPath, [...ytDlpPackage.args(flags), url]);
+};
+
+let ytDlpVersionPromise;
+
+const getYtDlpVersion = async () => {
+  if (!ytDlpVersionPromise) {
+    ytDlpVersionPromise = runProcessForOutput(ytDlpBinaryPath, ['--version'])
+      .then(({ stdout }) => stdout.trim() || null)
+      .catch(() => null);
+  }
+
+  return ytDlpVersionPromise;
 };
 
 const AUDIO_CODECS_SUPPORTED_IN_MP4 = new Set(['aac']);
@@ -470,10 +483,34 @@ const fetchVideoInfo = normalizedUrl =>
   ytDlp(normalizedUrl, {
     dumpSingleJson: true,
     noWarnings: true,
+    extractorArgs: YT_DLP_EXTRACTOR_ARGS,
   });
 
 const createDownloadError = (details = '') => {
   const trimmedDetails = details.trim();
+
+  if (
+    trimmedDetails.includes(`Sign in to confirm you're not a bot`) ||
+    trimmedDetails.includes('Please sign in') ||
+    trimmedDetails.includes('HTTP Error 403: Forbidden') ||
+    trimmedDetails.includes('Precondition check failed')
+  ) {
+    return {
+      status: 503,
+      message: 'YouTube is blocking this server right now. This often happens on Render-hosted IPs.',
+    };
+  }
+
+  if (
+    trimmedDetails.includes('Unable to extract') ||
+    trimmedDetails.includes('Unsupported URL') ||
+    trimmedDetails.includes('No video formats found')
+  ) {
+    return {
+      status: 503,
+      message: 'yt-dlp could not extract this YouTube video. Update the backend yt-dlp binary and try again.',
+    };
+  }
 
   if (trimmedDetails.includes('ffmpeg not found')) {
     return {
@@ -500,11 +537,15 @@ const createErrorPayload = (message, details = '') =>
     ? { error: message }
     : { error: message, details };
 
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
+  const ytDlpVersion = await getYtDlpVersion();
+
   res.json({
     message: `YouTube Downloader Backend is running. Frontend: ${FRONTEND_URL}`,
     ffmpegInstalled: hasFfmpeg(),
     ffmpegPath: FFMPEG_PATH,
+    ytDlpPath: ytDlpBinaryPath,
+    ytDlpVersion,
   });
 });
 
@@ -574,6 +615,7 @@ app.get('/api/download', async (req, res) => {
             audioQuality: requestedQuality === 'best' ? '0' : `${requestedQuality}K`,
             ffmpegLocation: FFMPEG_LOCATION || FFMPEG_PATH,
             concurrentFragments: 4,
+            extractorArgs: YT_DLP_EXTRACTOR_ARGS,
             output: outputTemplate,
             noWarnings: true,
           }
@@ -582,6 +624,7 @@ app.get('/api/download', async (req, res) => {
             mergeOutputFormat: hasFfmpeg() ? 'mkv' : undefined,
             ffmpegLocation: FFMPEG_LOCATION || FFMPEG_PATH || undefined,
             concurrentFragments: 4,
+            extractorArgs: YT_DLP_EXTRACTOR_ARGS,
             output: outputTemplate,
             noWarnings: true,
           };
