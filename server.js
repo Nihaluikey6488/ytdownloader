@@ -222,6 +222,17 @@ const getYtDlpVersion = async () => {
   return ytDlpVersionPromise;
 };
 
+const buildYtDlpArgs = (url, flags = {}) => [...ytDlpPackage.args(flags), url];
+
+const runYtDlpForJson = async (url, flags) => {
+  const { stdout } = await runProcessForOutput(
+    ytDlpBinaryPath,
+    buildYtDlpArgs(url, flags),
+  );
+
+  return JSON.parse(stdout);
+};
+
 const AUDIO_CODECS_SUPPORTED_IN_MP4 = new Set(['aac']);
 const VIDEO_CODECS_SUPPORTED_IN_MP4 = new Set(['h264']);
 
@@ -480,9 +491,10 @@ const serializeVideoInfo = info => ({
 });
 
 const fetchVideoInfo = normalizedUrl =>
-  ytDlp(normalizedUrl, {
+  runYtDlpForJson(normalizedUrl, {
     dumpSingleJson: true,
     noWarnings: true,
+    noPlaylist: true,
     extractorArgs: YT_DLP_EXTRACTOR_ARGS,
   });
 
